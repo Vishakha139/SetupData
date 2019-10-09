@@ -1,0 +1,182 @@
+'''
+Goal of this script is to grab the informatin from the excell sheets 
+required to be able to perform BMC upgrade. It also adds some additional
+information in the SERVERS section to assist with generation setup_data.yaml
+
+Create the yaml file with following format:
+
+CIMC-COMMON:
+  cimc_username: "admin"
+  cimc_password: <"password">
+ROLES:
+  control:
+  ## total of 3
+    - control-server-1
+    - control-server-2
+    - control-server-3
+  compute:
+    ## min of 1
+    - compute-server-1
+    - compute-server-2
+    - compute-server-3
+  block_storage:
+    ## total of 3
+    - storage-server-1
+    - storage-server-2
+    - storage-server-3
+SERVERS:
+  control-server-1:
+    cimc_info: {'cimc_ip': '<ip_addr>'}
+    rack_info: {'rack_id': 'RackA'}
+'''
+
+import xlrd
+import yaml
+import argparse
+import os
+import string
+
+parser = argparse.ArgumentParser()
+parser.add_argument("fileName", help="File name of the excell sheet.")
+parser.add_argument("sheetName", help="Name of the sheet of the pod you want to build magic-setup_data for.")
+args = parser.parse_args()
+
+print("Opening excel file...")
+book = xlrd.open_workbook(args.fileName)
+print("Reading sheet...")
+sheet = book.sheet_by_name(args.sheetName)
+
+user_name = 'foo'
+user_pass = 'bar'
+
+def get_servers(s):
+  print("Collecting server information...")
+  server_list = []
+  for i in range(1, s.nrows):
+    cell = s.row_values(i)
+    # Exclude management node information from list of servers in setup_data
+    if cell[1] != 'management': 
+      server_list.append({'hostname': cell[0],
+      'role': cell[1],
+      'cimc_address': cell[2],
+      # Remove leading 2 characters and trailing 2 digits from rack info to get rack ID
+      'rack_info': cell[5][2:-2],
+      'management_ip': cell[4],
+      'management_ipv6': cell[3],
+      'tor_info': {cell[6]: cell[7], cell[8]:cell[9]},
+      'sriov_tor_info': {cell[10]:cell[11], cell[12]:cell[13]}
+      })
+  return server_list
+
+def get_server_by_role(s, r):
+  print("Collecting " + r + " information...")
+  server_list = []
+  for server in s:
+    if server['role'] == r:
+      server_list.append(server['hostname'])
+  return server_list
+
+# Collect server hostname, role and cimc address
+servers = get_servers(sheet)
+
+# Create lists by role
+controllers = get_server_by_role(servers, 'control')
+computes = get_server_by_role(servers, 'compute')
+#storage = get_server_by_role(servers, 'block_storage')
+if len(get_server_by_role(servers, 'hdd storage')) > 0: 
+    storage = get_server_by_role(servers, 'hdd storage')
+if len(get_server_by_role(servers, 'ssd storage')) > 0: 
+    storage.extend(get_server_by_role(servers, 'ssd storage'))
+
+dict = {'CIMC-COMMON': {'cimc_username': 'admin', 'cimc_password': 'bar'}}
+dict['ROLES'] = {'control': controllers, 'block_storage': storage, 'compute': computes}
+
+'''
+SERVERS:
+  control-server-1:
+    cimc_info: {'cimc_ip': '<ip_addr>'}
+    rack_info: {'rack_id': 'RackA'}
+'''
+SERVERS = {}
+for s in servers:
+  
+  if (s['role'] == "hdd storage"):
+    SERVERS[s['hostname']] ={
+    'cimc_info': "{cimc_ip: " + s['cimc_address'] +"}",
+    'rack_info': "{rack_id: "+ s['rack_info'] +"}", 
+    'management_ip': s['management_ip'],
+    'management_ipv6': s['management_ipv6'],
+    #Might need to revisit this as we might only need hardware_info IF this is multi-backend
+    'hardware_info': "{osd_disk_type: HDD, root_drive_type: HDD}",
+    'tor_info': str(s['tor_info'])
+    #'sriov_tor_info': str(s['sriov_tor_info'])
+    }
+  elif (s['role'] =="ssd storage"):
+    SERVERS[s['hostname']] ={
+    'cimc_info': "{cimc_ip: " + s['cimc_address'] +"}",
+    'rack_info': "{rack_id: "+ s['rack_info'] +"}", 
+    'management_ip': s['management_ip'],
+    'management_ipv6': s['management_ipv6'],
+    #Might need to revisit this as we might only need hardware_info IF this is multi-backend
+    'hardware_info': "{osd_disk_type: SSD, root_drive_type: SSD}",
+    'tor_info': str(s['tor_info'])
+    #'sriov_tor_info': str(s['sriov_tor_info'])
+    }
+  elif (s['role'] =="control"):
+    SERVERS[s['hostname']] ={
+    'cimc_info': "{cimc_ip: " + s['cimc_address'] +"}",
+    'rack_info': "{rack_id: "+ s['rack_info'] +"}", 
+    'management_ip': s['management_ip'],
+    'management_ipv6': s['management_ipv6'],
+    #Might need to revisit this as we might only need hardware_info IF this is multi-backend
+    'hardware_info': "{osd_disk_type: SSD, root_drive_type: SSD}",
+    'tor_info': str(s['tor_info'])
+    #'sriov_tor_info': str(s['sriov_tor_info'])
+    }
+  else:
+    SERVERS[s['hostname']] = {
+    'cimc_info': "{cimc_ip: " + s['cimc_address'] +"}",
+    'rack_info': "{rack_id: "+ s['rack_info'] +"}", 
+    'management_ip': s['management_ip'],
+    'management_ipv6': s['management_ipv6'],    
+    'tor_info': str(s['tor_info']),
+    'sriov_tor_info': str(s['sriov_tor_info'])
+  }
+
+dict['SERVERS'] = SERVERS
+
+print("Writing temporary servers.yaml file...")
+with open('servers.yaml', 'w') as yaml_file:
+  yaml.dump(dict, yaml_file, default_flow_style=False)
+
+# Next part is a hack to remove the apostrophe's around cimc_info and rack_info section
+print("Applying Hack1...")
+with open('servers.yaml', 'r') as infile, open('temp.yaml', 'w') as outfile:
+  data = infile.read()
+  data = data.replace('\'', '')
+  outfile.write(data)
+
+# One more hack to add apostrophe's around the ipv6 BMC addresses
+print("Applying Hack2...")
+with open('temp.yaml', 'r') as infile, open('magic-setup_data_new.yaml', 'w') as outfile:
+  data = infile.readlines()
+  for line in data:
+    if "cimc_ip" in line:
+      line = line.replace("cimc_ip: ", "cimc_ip: \'")
+      line = line.replace("}", "\'}")
+      outfile.write(line)
+    #elif "management_ipv6" in line:
+    #  line = line.replace("management_ipv6: ", "management_ipv6: \'")
+    #  line = line.rstrip() + "\'\n" 
+    #  outfile.write(line)
+    else:
+      outfile.write(line)
+  
+
+print("Removing temporary files...")
+os.remove("servers.yaml")
+os.remove("temp.yaml")
+
+print("magic-setup_data_new.yaml generated.")
+print("All done!")
+
