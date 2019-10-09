@@ -1,5 +1,5 @@
 
-script to help automate setup_data.yaml generation from excell sheets
+script to help automate setup_data.yaml generation from excel sheets
 
 Place the script in the same directory as the excell sheet with all the info.
 Run the script with 2 arguments: excel file name, and tab name with the pod details.
